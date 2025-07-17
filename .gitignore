@@ -9,7 +9,7 @@
 *.tfstate.backup
 
 # Local override and variable files (optional)
-*.tfvars
+//*.tfvars
 *.tfvars.json
 *.override.tf
 *.override.tf.json
