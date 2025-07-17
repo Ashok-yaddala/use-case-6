@@ -52,7 +52,10 @@ jobs:
           go-version: '1.22'
           
       - name: Copy backend override for test
-        run: cp test/backend_override.tf ./
+        run: |
+            ls
+            pwd
+            cp test/backend_override.tf ./
 
       - name: Run Terratest Plan-Only Test
         run: |
