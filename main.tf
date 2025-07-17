@@ -8,7 +8,7 @@ module "ec2" {
 module "lambda_start" {
   source             = "./modules/lambda_function"
   function_name      = "server_startup"
-  handler            = "start_ec2.lambda_handler"
+  handler            = "server_startup.lambda_handler"
   runtime            = var.lambda_runtime
   lambda_source      = "${path.module}/modules/lambda_function/server_startup.py"
   ec2_instance_id    = module.ec2.instance_id 
@@ -18,7 +18,7 @@ module "lambda_start" {
 module "lambda_stop" {
   source             = "./modules/lambda_function"
   function_name      = "server_stop"
-  handler            = "stop_ec2.lambda_handler"
+  handler            = "server_stop.lambda_handler"
   runtime            = var.lambda_runtime
   lambda_source      = "${path.module}/modules/lambda_function/server_stop.py"
   ec2_instance_id    = module.ec2.instance_id 
