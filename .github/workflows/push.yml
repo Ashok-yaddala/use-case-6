@@ -1,0 +1,217 @@
+name: Terraform Deploy
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - '**'
+  #     - main   
+  pull_request:
+    types: [opened, synchronize, reopened]
+  
+
+jobs:
+  terraform:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write 
+
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
+
+
+      - name: Set up Python (for Checkov)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::173003893026:role/OIDC-github-actions
+          aws-region: us-east-1
+
+      - name: Verify identity
+        run: aws sts get-caller-identity
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          
+      - name: Copy backend override for test
+        run: cp test/backend_override.tf ./
+
+      - name: Run Terratest Plan-Only Test
+        run: |
+          cd test
+          go test -v -timeout 20m .
+
+
+      - name: Clean up backend override
+        run: rm -f backend_override.tf
+        
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v2
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ap-south-1
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Initialize TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint -f compact
+        continue-on-error: true
+
+      - name: Terraform Init
+        run: terraform init -reconfigure
+
+      - name: Terraform Validate
+        run: terraform validate
+        
+      - name: Run Checkov Security Scan
+        run: checkov -d . --framework terraform
+        continue-on-error: true
+
+      - name: Install Conftest (OPA)
+        run: |
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.45.0/conftest_0.45.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.45.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin
+          rm -f conftest_0.45.0_Linux_x86_64.tar.gz
+
+      - name: Run OPA Policy Check with Conftest
+        run: |
+          terraform plan -out tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+          conftest test tfplan.json -p policy
+        continue-on-error: true
+          
+      - name: Setup Node.js
+        # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install terraform-docs
+        # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          curl -sSLo ./terraform-docs.tar.gz https://terraform-docs.io/dl/v0.16.0/terraform-docs-v0.16.0-$(uname)-amd64.tar.gz
+          tar -xzf terraform-docs.tar.gz
+          chmod +x terraform-docs
+          sudo mv terraform-docs /usr/local/bin/
+
+      - name: Generate Terraform Docs and Commit
+        # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          git config --local user.email "narendiransankar1699@.com"
+          git config --local user.name "narendiran s"
+
+          terraform-docs markdown . > README.md.new
+          mv README.md.new README.md
+
+          if [ -f README.md ]; then
+            git add README.md
+            if git commit -m "docs: Update README.md"; then
+              git push
+              echo "Successfully committed and pushed README.md changes."
+            else
+              echo "No README.md changes to commit."
+            fi
+          else
+            echo "README.md was not generated."
+          fi
+
+      - name: Update Pull Request
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style \`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization \`${{ steps.init.outcome }}\`
+            #### Terraform Validation \`${{ steps.validate.outcome }}\`
+            #### Terraform Plan \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+      
+      - name: Read README.md content
+        id: readme_content # Assign an ID to reference this step's outputs
+        run: |
+          # Use 'cat' to read the file and store it in an environment variable, then echo it to GITHUB_OUTPUT
+          # We're careful here to handle multiline content by escaping newlines
+          # and using a delimiter for the output variable.
+          README=$(cat README.md)
+          echo "readme<<EOF" >> $GITHUB_OUTPUT
+          echo "$README" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post README.md content to Pull Request
+        uses: actions/github-script@v7 # Action to run JavaScript in your workflow
+        if: github.event_name == 'pull_request' # Ensure this only runs for PR events
+        env:
+          # Get the README content from the output of the previous step
+          README_BODY: "${{ steps.readme_content.outputs.readme }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }} # GitHub token for authentication
+          script: |
+            const output = `#### Current README.md Content
+            
+            <details><summary>Show README.md</summary>
+            
+            \`\`\`markdown
+            ${process.env.README_BODY}
+            \`\`\`
+            
+            </details>
+            
+            *Posted by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          
+      - name: Terraform Plan
+        run: terraform plan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
